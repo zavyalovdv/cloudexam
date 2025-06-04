@@ -1,0 +1,238 @@
+1. Скачать образы Debian и VirtualRouter из стора
+
+2. Загрузить файлики web-app.py config.toml locustfile.py
+
+3. Создать мост для приватной сети
+cp /etc/network/interfaces.d/mini{one,two}br.cfg
+auto minitwobr
+iface minitwbr inet static
+  address 172.18.100.1
+  network 172.18.100.0
+  netmask 255.255.255.0
+  bridge_stp off
+  bridge_fd 0
+  bridge_maxwait 0
+  bridge_ports tap0
+  
+#### Конфиги интерфейсов
+cat /etc/network/interfaces.d/minionebr.cfg
+auto minionebr
+iface minionebr inet static
+  address 172.16.100.1
+  network 172.16.100.0
+  netmask 255.255.255.0
+  bridge_stp off
+  bridge_fd 0
+  bridge_maxwait 0
+  bridge_ports tap0
+
+cat /etc/network/interfaces.d/minionebr.cfg
+auto minionebr
+iface minionebr inet static
+  address 172.16.100.1
+  network 172.16.100.0
+  netmask 255.255.255.0
+  bridge_stp off
+  bridge_fd 0
+  bridge_maxwait 0
+  bridge_ports tap0
+
+cat /etc/network/interfaces.d/tap.cfg
+iface tap0 inet auto
+    pre-up ip tuntap add tap0 mode tap user root
+
+cat /etc/network/interfaces
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).
+
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+# The primary network interface
+auto ens192
+iface ens192 inet dhcp
+
+###
+
+
+4. IP-маскарадинг на хосте OpenNebula для выхода в инет из приватной сети
+iptables -t nat -A POSTROUTING -o ens192 -s 172.18.100.0/24 -j MASQUERADE
+Проброс 80 порта хоста OpenNebula на VirtualRouter
+iptables -t nat -A PREROUTING -i minionebr -p tcp --dport 80 -j DNAT --to-destination 172.16.100.100:80
+ip link set dev minionebr up
+
+5. Создать публичную и приватную сеть в OpenNebula
+Публичная 172.16.100.0/24
+Приватная 172.18.100.0/24
+
+5. Обновить шаблон VirtualRouter
+
+указать в Context - Start script
+echo -e \"root\nroot\" | passwd root
+sysctl -w net.ipv4.ip_forward=1
+iptables -t nat -A PREROUTING -p tcp --dport 80 -m statistic --mode nth --every 2 --packet 0 -j DNAT --to-destination 172.18.100.10:5000
+iptables -t nat -A PREROUTING -p tcp --dport 80 -m statistic --mode nth --every 1 --packet 0 -j DNAT --to-destination 172.18.100.20:5000
+iptables -t nat -A POSTROUTING -j MASQUERADE
+
+PASSWORD root
+ROOT_PASSWORD root
+
+Context variables для балансировщика
+ONEAPP_VNF_LB_ENABLED = "YES"
+ONEAPP_VNF_LB0_IP        = "eth0"
+ONEAPP_VNF_LB0_PORT      = "80"
+ONEAPP_VNF_LB0_PROTOCOL  = "TCP"
+ONEAPP_VNF_LB0_METHOD    = "NAT"
+ONEAPP_VNF_LB0_SCHEDULER = "rr"
+ONEAPP_VNF_LB0_SERVER0_HOST = "172.18.100.10",
+ONEAPP_VNF_LB0_SERVER0_PORT = "5000",
+ONEAPP_VNF_LB0_SERVER1_HOST = "172.18.100.20",
+ONEAPP_VNF_LB0_SERVER1_PORT = "5000"
+
+
+Сети указываются при создании инстанса
+
+5. Создать инстанс VirtualRouter
+IP-в публичной сети 172.16.100.100
+IP-в приватной сети 172.18.100.100
+Проверить выход в инет
+
+6. Создать щаблон PostgreSQL на основе Debian 12
+PASSWORD root
+ROOT_PASSWORD root
+IP-в приватной сети 172.18.100.30
+apt update -y
+apt install -y postgresql
+systemctl enable --now postgresql
+
+5. Создать виртуалку db
+IP-в приватной сети 172.18.100.30
+
+6. Создать и настроить пользователя и БД
+sudo -u postgres psql
+CREATE DATABASE test;
+CREATE USER devops WITH PASSWORD 'devops';
+GRANT ALL PRIVILEGES ON DATABASE test TO devops;
+
+-- (Опционально) Если нужно предоставить права на все будущие таблицы
+\c test
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO devops;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO devops;
+
+nano /etc/postgresql/15/main/postgresql.conf
+listen_addresses = '*'
+
+nano /etc/postgresql/15/main/postgresql.conf
+host    test    devops      0.0.0.0/0    md5
+
+systemctl restart postgresql
+systemctl status postgresql
+
+psql -h localhost -U devops test
+
+7. Создать шаблон app на основе Debian
+PASSWORD root
+ROOT_PASSWORD root
+!!! Сеть приватная, не забыть подключить файлы и указать Start script
+apt update -y
+apt install -y python3 python3-pip dos2unix
+pip install Flask psycopg2-binary --break-system-packages
+mount /dev/sr0 /mnt
+cp /mnt/{config.toml,web-app.py} /opt
+dos2unix /opt/web-app.py
+chmod +x /opt/web-app.py
+
+Сами файлы на всякий
+###############
+config.toml
+
+HOST = '0.0.0.0'
+DBNAME = 'test'
+DBUSER = 'devops'
+DBHOST = '172.18.100.30' 
+DBPASSWORD = 'devops'
+
+###################
+web-app.py
+#!/usr/bin/python3
+
+from flask import Flask, request
+import tomllib
+import psycopg2
+import time
+import math
+
+app = Flask(__name__)
+
+with open('config.toml', 'rb') as f:
+  data = tomllib.load(f)
+
+def _check_postgres():
+  try:
+    conn = psycopg2.connect(f"dbame={data['DBNAME']} user={data['DBUSER']} host={data['DBHOST']} password={data['DBPASSWORD']} connect_timeout=1")
+    conn.close()
+    return True
+  except:
+    return False
+
+@app.route('/')
+def hello():
+  return 'hello world'
+
+@app.route('/status')
+def status():
+  return 'app is ok' if _check_postgres() else 'fail connect to database'
+
+if __name__ == '__main__':
+  app.run(host=data['HOST'])
+
+###################
+#!/usr/bin/python3
+
+from locust import HttpUser, task, between
+
+class WebsiteTestUser(HttpUser):
+    wait_time = between(5, 90)
+
+    def on_start(self):
+        pass
+
+    def on_stop(self):
+        pass
+
+    @task()
+    def hello_world(self):
+        self.client.get("/")
+        self.client.get("/status")
+
+8. Создать два инстанса app из шаблона app
+app1 - IP-в приватной сети 172.18.100.10
+app2 - IP-в приватной сети 172.18.100.20
+
+
+9. поправить адрес БД в config.toml  при необходимости
+
+10. проверить запуск приложения ./web-app.py
+curl http://172.18.100.10:5000
+curl http://172.18.100.10:5000/status
+
+curl http://172.18.100.20:5000
+curl http://172.18.100.10:5000/status
+
+11. Создать шаблон locust на основе Debian
+IP-в публичной сети 172.16.100.10
+Не забыть файл locustfile.py
+PASSWORD root
+ROOT_PASSWORD root
+
+apt update -y
+apt install -y python3 python3-pip python3-locust dos2unix
+mount /dev/sr0 /mnt
+cp /mnt/locustfile.py /opt
+dos2unix /opt/locustfile.py
+chmod +x /opt/locustfile.py
+
+locust -f locustfile.py --headless -u 1000 -r 1 --host 172.16.100.100:80

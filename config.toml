@@ -1,0 +1,6 @@
+HOST = '0.0.0.0'
+DBNAME = 'test'
+DBUSER = 'devops'
+DBHOST = '172.18.100.30' 
+DBPASSWORD = 'devops'
+
